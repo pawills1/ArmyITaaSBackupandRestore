@@ -19,14 +19,20 @@
     Optional output path to save the results
 
 .EXAMPLE
-    Get-IntuneAssignments -GroupName AFC-EUD-WIN-USER-PERSONA-INTERNAL
+    Get-IntuneAssignments
 
 .EXAMPLE
-    Get-IntuneAssignments -GroupName AFC-EUD-WIN-USER-PERSONA-INTERNAL -EnableTranscript
+    Get-IntuneAssignments -GroupName T2COM-EUD-WIN-USER-PERSONA-INTERNAL -EnableTranscript C:\repo\test
+
+.EXAMPLE
+    Get-IntuneAssignments  -GroupName 'AFC-EUD-WIN10-USER-STIG TESTING' -EnableTranscript C:\repo\test
+
+.EXAMPLE
+    Get-IntuneAssignments  -EnableTranscript C:\repo\test
 
 .NOTES
 Author: Patrick Wills
-Date: 11/21/2025
+Date: 1/26/2026
 #>
     [CmdletBinding()]
     Param(
@@ -34,8 +40,12 @@ Date: 11/21/2025
         [string]$GroupName,
         [Parameter(Mandatory = $false)]
         [string]$OutputPath,
-        [switch]$EnableTranscript
+        [switch]$EnableTranscript,        # By default, use double quotes. Switch to single quotes if you prefer.
+        [ValidateSet('Double', 'Single')]
+        [string]$QuoteStyle = 'Double'
     )
+
+
 
     #test for powerhsell 7
     if ($PSVersionTable.PSVersion.Major -lt 7) {
@@ -132,9 +142,11 @@ Date: 11/21/2025
         $scIds = (Get-MgBetaDeviceManagementConfigurationPolicy -All).Id
 
         # Get target group once
+
         $Groups = Get-MgBetaGroup -Filter "DisplayName eq '$GroupName'" -ErrorAction Stop
         if (-not $Groups) {
-            Write-Error "Group '$GroupName' not found" -ErrorAction Stop
+            Write-Warning "If you use the -GroupName parameter and the group name has spaces you need to put quotes around the group name:  Get-IntuneAssignments -GroupName 'AFC-EUD-WIN10-USER-STIG TESTING' "
+            Write-Error "Group $GroupName not found" -ErrorAction Stop
         }
         Write-host "AAD Group Name: $($Groups.displayName)" -ForegroundColor Green
         $groupId = $Groups.id
