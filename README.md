@@ -1,8 +1,8 @@
-# ArmyITaaSBackupandRestore
+# ArmyITaaSIntuneBackupandRestore
 
 ## Overview
 
-**ArmyITaaSBackupandRestore** is a secure, Constrained Language Mode (CLM)-compliant PowerShell module designed to provide automated backup and restore operations for Army ITaaS environments.
+**ArmyITaaSIntuneBackupandRestore** is a secure, Constrained Language Mode (CLM)-compliant PowerShell module designed to provide automated backup and restore operations for Army ITaaS environments.
 
 It is purpose-built to run on **Privileged Access Workstations (PAWs)** under strict **Windows Defender Application Control (WDAC)** enforcement. The module ensures that all functions operate without requiring elevated script privileges or blocked execution paths, strictly adhering to Zero Trust principles and DoD secure coding practices.
 
