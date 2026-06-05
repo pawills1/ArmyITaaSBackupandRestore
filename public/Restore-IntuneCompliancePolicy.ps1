@@ -1,58 +1,99 @@
-function Restore-IntuneCompliancePolicy {
+﻿function Restore-IntuneCompliancePolicy {
    <#
 .Synopsis
-   Restores Intune compliance policies
-   Powershell 7 required
-   Modules needed to be import
-   import-module -Name Microsoft.Graph.Authentication -Global -Force -Verbose
-   import-module -Name Microsoft.Graph.Beta.DeviceManagement -Global -Force -Verbose
+   Restores Intune compliance policies.
+   PowerShell 7 or later is required.
+   Required modules:
+      Import-Module -Name Microsoft.Graph.Authentication -Global -Force
+      Import-Module -Name Microsoft.Graph.Beta.DeviceManagement -Global -Force
+
 .DESCRIPTION
-   Restores Intune compliance policies
+   Restores Intune compliance policies from JSON backup files.
+   Existing scope tags embedded in the backup JSON are always stripped before restore.
+   Optionally applies a Role Scope Tag to each restored policy so it is visible
+   only to admins assigned that scope. Supported scope tag names are: T2COM, GCC, PAW, AVD.
+   #If -ScopeTagName is omitted you will be prompted to choose one interactively.
 
 .PARAMETER Path
-   The path to the directory containing the JSON files to be restored.
+   The path to the directory containing the JSON backup files to be restored.
+
+.PARAMETER ScopeTagName
+   Optional. The display name of the Role Scope Tag to apply to each restored policy.
+   Accepted values: T2COM, GCC, PAW, AVD.
+   #If omitted you are prompted interactively; press Enter to skip and use the default scope.
 
 .EXAMPLE
-   Restore-IntuneCompliancePolicy -path C:\REPO\test
+   Restore-IntuneCompliancePolicy -Path C:\Backup\CompliancePolicies
+
+.EXAMPLE
+   # Apply the T2COM scope tag to every restored policy
+   Restore-IntuneCompliancePolicy -Path C:\Backup\CompliancePolicies -ScopeTagName T2COM
+
+.EXAMPLE
+   # Apply the GCC scope tag to every restored policy
+   Restore-IntuneCompliancePolicy -Path C:\Backup\CompliancePolicies -ScopeTagName GCC
+
+.EXAMPLE
+   Restore-IntuneCompliancePolicy -Path C:\Backup\CompliancePolicies -ScopeTagName PAW
+
+.NOTES
+   Author: Patrick Wills
+   Date:   1/21/2025
 #>
 
-   [CmdletBinding()] #enables advanced function parameters
-   Param
-   (
-      #The path to the directory containing the JSON files to be restored.
+   [CmdletBinding()]
+   Param (
+      # Path to the directory containing the JSON backup files.
       [Parameter(Mandatory = $true)]
-      [string]$Path
+      [string]$Path,
+
+      # Optional Role Scope Tag name to apply to each restored policy.
+      [Parameter(Mandatory = $false)]
+      [ValidateSet('T2COM', 'GCC', 'PAW', 'AVD')]
+      [string]$ScopeTagName
    )
-   #test for powerhsell 7
+
+   #region Prerequisites
+
+   # Verify PowerShell 7+
    if ($PSVersionTable.PSVersion.Major -lt 7) {
-      #Write-Warning 'This script requires PowerShell 7 or later. Please upgrade your version of PowerShell and try again.' -WarningAction Continue
-      Write-Error 'Powershell 7 not Installed' -ErrorAction Break -RecommendedAction "Install Powershell 7 from company portal"
+      Write-Error 'PowerShell 7 is not installed.' -ErrorAction Stop -RecommendedAction 'Install PowerShell 7 from the company portal.'
    }
 
-   #test for required modules
+   # Verify required modules are available
    $modules = @('Microsoft.Graph.Authentication', 'Microsoft.Graph.Beta.DeviceManagement')
    foreach ($module in $modules) {
-      if (-not(Get-Module -Name $module -ListAvailable)) {
-         Write-Warning "Module $module is not installed. Please import the module and try again." -WarningAction Continue
-         Write-Host "import-module -Name $module -Force -Verbose" -ForegroundColor Cyan
+      if (-not (Get-Module -Name $module -ListAvailable)) {
+         Write-Warning "Module '$module' is not installed. Attempting import..."
+         try {
+            Import-Module -Name $module -Global -Force -ErrorAction Stop
+         }
+         catch {
+            Write-Error "Failed to import module '$module'. Please install it and try again." -ErrorAction Stop
+         }
       }
    }
-   #connect to graph with error handling and retry logic
+
+   #endregion
+
+   #region Graph Connection
+
    $maxRetries = 3
    $retryCount = 0
-   $connected = $false
+   $connected  = $false
 
    while (-not $connected -and $retryCount -lt $maxRetries) {
       try {
-         Connect-MgGraph -Environment USGovDoD -NoWelcome -Scopes "DeviceManagementConfiguration.Read.All", "DeviceManagementConfiguration.ReadWrite.All"
+         Connect-MgGraph -Environment USGovDoD -NoWelcome `
+            -Scopes 'DeviceManagementConfiguration.Read.All', 'DeviceManagementConfiguration.ReadWrite.All', 'DeviceManagementRBAC.Read.All'
          $connected = $true
-         Write-Host "Successfully connected to Graph API." -ForegroundColor Green
+         Write-Host 'Successfully connected to the Graph API.' -ForegroundColor Green
       }
       catch {
          $retryCount++
-         Write-Warning "Error connecting to Graph API. Attempt $retryCount of $maxRetries. Please check your credentials or network connection."
+         Write-Warning "Graph API connection attempt $retryCount of $maxRetries failed."
          if ($retryCount -eq $maxRetries) {
-            Write-Error "Failed to connect to Graph API after $maxRetries attempts. Exiting script." -ErrorAction Stop
+            Write-Error "Failed to connect to the Graph API after $maxRetries attempts." -ErrorAction Stop
          }
          else {
             Start-Sleep -Seconds 5
@@ -60,71 +101,147 @@ function Restore-IntuneCompliancePolicy {
       }
    }
 
-   #start powershell transcript
-   $date = Get-Date -Format "yyyy-MM-dd"
-   $transcript = "Restore-IntuneCompliancePolicy-$date.log"
-   $transcriptpath = "$path\$transcript"
-   start-transcript -Path $transcriptpath -Append  -Force
+   #endregion
 
-   #Get all compliance policies
-   #might use later
-   #(Get-MgBetaDeviceManagementDeviceConfiguration -All).DisplayName
+   #region Scope Tag Lookup
 
-   $compPol = Get-ChildItem $path -Include "*.json" -Recurse
+   # Available scope tags for reference (plain hashtables — CLM-safe, no [PSCustomObject] cast)
+   $availableScopeTags = @(
+      @{ Name = 'T2COM'; Description = 'Tier 2 Common – applied to shared baseline configurations' }
+      @{ Name = 'GCC'  ; Description = 'GCC tenant – applied to Government Community Cloud policies' }
+      @{ Name = 'PAW'  ; Description = 'Privileged Access Workstation – applied to PAW device configs' }
+      @{ Name = 'AVD'  ; Description = 'Azure Virtual Desktop – applied to AVD session host policies' }
+   )
 
-   $searchString = "deviceManagement/deviceCompliancePolicies"
+   # If the caller did not supply -ScopeTagName (or supplied an empty string), prompt interactively
+   if ([string]::IsNullOrWhiteSpace($ScopeTagName)) {
+      Write-Host ''
+      Write-Host '========================================================' -ForegroundColor Yellow
+      Write-Host '  Available Scope Tags' -ForegroundColor Yellow
+      Write-Host '========================================================' -ForegroundColor Yellow
+      foreach ($tag in $availableScopeTags) {
+         Write-Host ("  {0,-8} — {1}" -f $tag['Name'], $tag['Description']) -ForegroundColor Cyan
+      }
+      Write-Host '--------------------------------------------------------' -ForegroundColor Yellow
+      Write-Host '  Examples:' -ForegroundColor Yellow
+      Write-Host '    Restore-IntuneCompliancePolicy -Path <path> -ScopeTagName T2COM' -ForegroundColor Gray
+      Write-Host '    Restore-IntuneCompliancePolicy -Path <path> -ScopeTagName GCC'   -ForegroundColor Gray
+      Write-Host '    Restore-IntuneCompliancePolicy -Path <path> -ScopeTagName PAW'   -ForegroundColor Gray
+      Write-Host '    Restore-IntuneCompliancePolicy -Path <path> -ScopeTagName AVD'   -ForegroundColor Gray
+      Write-Host '========================================================' -ForegroundColor Yellow
+      Write-Host ''
+      $ScopeTagName = Read-Host 'Enter a scope tag name from the list above, or press Enter to use the default scope'
+   }
 
-   foreach ($policy in $compPol) {
+   # Resolve the scope tag name to its numeric ID (roleScopeTagIds expects strings of integers).
+   $resolvedScopeTagIds = @()
 
-      $rawdata = Get-Content -LiteralPath $policy.FullName -Raw
-      $parsedData = $rawdata | ConvertFrom-Json
-      $match = $parsedData | Out-String | Select-String -Pattern $searchString
-      If ($match) {
+   if (-not [string]::IsNullOrWhiteSpace($ScopeTagName)) {
+      Write-Host "Resolving scope tag ID for '$ScopeTagName'..." -ForegroundColor Cyan
+      try {
+         $scopeTagUri  = 'https://dod-graph.microsoft.us/beta/deviceManagement/roleScopeTags'
+         $scopeTagResp = Invoke-MgGraphRequest -Method GET -Uri $scopeTagUri
+         $matchingTag  = $scopeTagResp.value | Where-Object { $_.displayName -eq $ScopeTagName }
 
-         $deviceCompliancePolicyContent = Get-Content -LiteralPath $policy.FullName -Raw
-         $deviceCompliancePolicyDisplayName = ($deviceCompliancePolicyContent | ConvertFrom-Json).DisplayName
-         $requestBodyObject = $deviceCompliancePolicyContent | ConvertFrom-Json
-         $newObject = $requestBodyObject | Select-Object -Property * -ExcludeProperty '@odata.context', 'scheduledActionsForRule@odata.context', 'assignments@odata.context', id, createdDateTime, lastModifiedDateTime, scheduledActionsForRule 
-
-         if (-not ($newObject.scheduledActionsForRule)) {
-            $scheduledActionsForRule = @(
-               @{
-                  ruleName                      = "PasswordRequired"
-                  scheduledActionConfigurations = @(
-                     @{
-                        actionType             = "block"
-                        gracePeriodHours       = 0
-                        notificationTemplateId = ""
-                     }
-                  )
-               }
-            )
-            $newObject | Add-Member -NotePropertyName scheduledActionsForRule -NotePropertyValue $scheduledActionsForRule -Force
-            # Update the request body reflecting the changes
-            $requestBody = $newObject | ConvertTo-Json -Depth 100
+         if ($matchingTag) {
+            $resolvedScopeTagIds = @($matchingTag.id)
+            Write-Host "Scope tag '$ScopeTagName' resolved to ID: $($matchingTag.id)" -ForegroundColor Green
          }
-         #Restore the device Configuration
+         else {
+            Write-Warning "Scope tag '$ScopeTagName' was not found in the tenant. Policies will be restored with the default scope."
+         }
+      }
+      catch {
+         Write-Warning "Unable to retrieve scope tags. Policies will be restored with the default scope. Error: $_"
+      }
+   }
+   else {
+      Write-Host 'No scope tag selected. Policies will be restored with the default scope.' -ForegroundColor Yellow
+   }
+
+   #endregion
+
+   #region Transcript
+
+   $date           = Get-Date -Format 'yyyy-MM-dd'
+   $transcriptPath = Join-Path -Path $Path -ChildPath "Restore-IntuneCompliancePolicy-$date.log"
+   Start-Transcript -Path $transcriptPath -Append -Force
+
+   #endregion
+
+   #region Restore
+
+   $searchString = 'deviceManagement/deviceCompliancePolicies'
+   $jsonFiles    = Get-ChildItem -Path $Path -Include '*.json' -Recurse
+
+   foreach ($policy in $jsonFiles) {
+
+      $rawData    = Get-Content -LiteralPath $policy.FullName -Raw
+      $parsedData = $rawData | ConvertFrom-Json
+      $match      = $parsedData | Out-String | Select-String -Pattern $searchString
+
+      if ($match) {
+
+         # Parse JSON as a hashtable — avoids all PSObject/Add-Member usage; fully CLM-safe
+         $policyHash        = $rawData | ConvertFrom-Json -AsHashtable
+         $policyDisplayName = $policyHash['DisplayName']
+
+         # Strip read-only / server-generated properties AND any existing scope tags from the backup
+         # CLM-safe: rebuild hashtable by keeping only allowed keys (method invocation is blocked in CLM)
+         $keysToStrip = @('@odata.context', 'scheduledActionsForRule@odata.context',
+                          'assignments@odata.context', 'id', 'createdDateTime',
+                          'lastModifiedDateTime', 'scheduledActionsForRule', 'roleScopeTagIds')
+         $cleanHash = @{}
+         foreach ($k in $policyHash.Keys) {
+            if ($keysToStrip -notcontains $k) {
+               $cleanHash[$k] = $policyHash[$k]
+            }
+         }
+         $policyHash = $cleanHash
+
+         # Always inject a default scheduledActionsForRule (original property was stripped above)
+         $policyHash['scheduledActionsForRule'] = @(
+            @{
+               ruleName                      = 'PasswordRequired'
+               scheduledActionConfigurations = @(
+                  @{
+                     actionType             = 'block'
+                     gracePeriodHours       = 0
+                     notificationTemplateId = ''
+                  }
+               )
+            }
+         )
+
+         # Apply scope tag in the create payload so scoped RBAC admins can POST successfully.
+         if ($resolvedScopeTagIds.Count -gt 0) {
+            $policyHash['roleScopeTagIds'] = $resolvedScopeTagIds
+            Write-Host "Applying scope tag '$ScopeTagName' (ID: $($resolvedScopeTagIds[0])) to '$policyDisplayName'." -ForegroundColor Cyan
+         }
+         else {
+            $policyHash['roleScopeTagIds'] = @()
+         }
+
+         $requestBody = $policyHash | ConvertTo-Json -Depth 100
+
          try {
-            $uri = "https://dod-graph.microsoft.us/beta/deviceManagement/deviceCompliancePolicies/"
-            $contentType = "application/json"
-            $null = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $requestBody -ContentType $contentType
-            Write-host "Successfully created policy $deviceCompliancePolicyDisplayName" -ForegroundColor Green
-         }
+            $uri         = 'https://dod-graph.microsoft.us/beta/deviceManagement/deviceCompliancePolicies/'
+            $contentType = 'application/json'
+            $null        = Invoke-MgGraphRequest -Method POST -Uri $uri -Body $requestBody -ContentType $contentType
 
+            Write-Host "Successfully restored compliance policy: '$policyDisplayName'." -ForegroundColor Green
+         }
          catch {
-            Write-Verbose "$deviceCompliancePolicyDisplayName - Failed to restore compliance policy" -Verbose
+            Write-Verbose "$policyDisplayName - Failed to restore compliance policy." -Verbose
             Write-Error $_ -ErrorAction Continue
          }
       }
-
       else {
-         Write-Warning "The following objects are not compliance policies and will not be restored please use the correct restore function for the configuration type $policy"  
+         Write-Warning "Skipping '$($policy.Name)' — it does not appear to be a compliance policy. Use the appropriate restore function for this configuration type."
       }
    }
 
-   #stop powershell transcript
-   stop-transcript
+   #endregion
+
+   Stop-Transcript
 }
-
-
-
